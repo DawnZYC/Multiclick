@@ -1,14 +1,31 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Optional, Union
+from typing import List, Optional, Union
 
-from multiclick.models import ClickMode, ClickPosition, ClickProgress, ClickResult, KeyboardTarget
+from multiclick.models import (
+    ClickMode,
+    ClickPosition,
+    ClickProgress,
+    ClickResult,
+    CustomAction,
+    CustomLoopProgress,
+    CustomLoopResult,
+    KeyboardTarget,
+)
+from multiclick.services.custom_action_recorder import CustomActionRecorder
+from multiclick.services.custom_loop_runner import CustomLoopRunner
 from multiclick.services.keyboard_capture import KeyboardCaptureService
 from multiclick.services.keyboard_clicker import KeyboardClickRunner
 from multiclick.services.mouse_clicker import MouseClickRunner
 from multiclick.services.position_capture import PositionCaptureService
 from multiclick.ui import messages
-from multiclick.validation import ValidationError, build_keyboard_click_config, build_mouse_click_config
+from multiclick.ui.custom_record_dialog import CustomRecordDialog
+from multiclick.validation import (
+    ValidationError,
+    build_custom_loop_config,
+    build_keyboard_click_config,
+    build_mouse_click_config,
+)
 
 
 class MainWindow:
@@ -20,13 +37,20 @@ class MainWindow:
         self.mode_var = tk.StringVar(value=ClickMode.MOUSE.value)
         self.interval_var = tk.StringVar(value="0.1")
         self.duration_var = tk.StringVar(value="10")
+        self.loop_count_var = tk.StringVar(value="1")
         self.target_var = tk.StringVar(value=messages.DEFAULT_POSITION_TEXT)
         self.status_var = tk.StringVar(value=messages.default_status(ClickMode.MOUSE))
 
         self._selected_position: Optional[ClickPosition] = None
         self._selected_key: Optional[KeyboardTarget] = None
-        self._capture_service: Optional[Union[PositionCaptureService, KeyboardCaptureService]] = None
-        self._click_runner: Optional[Union[MouseClickRunner, KeyboardClickRunner]] = None
+        self._custom_actions: List[CustomAction] = []
+        self._capture_service: Optional[
+            Union[PositionCaptureService, KeyboardCaptureService, CustomActionRecorder]
+        ] = None
+        self._click_runner: Optional[
+            Union[MouseClickRunner, KeyboardClickRunner, CustomLoopRunner]
+        ] = None
+        self._record_dialog: Optional[CustomRecordDialog] = None
         self._active_run_mode: Optional[ClickMode] = None
 
         self._build_layout()
@@ -34,6 +58,11 @@ class MainWindow:
         self._refresh_mode_state()
 
     def close(self) -> None:
+        if self._record_dialog is not None:
+            dialog = self._record_dialog
+            self._record_dialog = None
+            dialog.close()
+
         if self._capture_service is not None:
             self._capture_service.stop()
             self._capture_service = None
@@ -67,6 +96,7 @@ class MainWindow:
 
         mode_frame = ttk.LabelFrame(container, text="模式选择", padding=12)
         mode_frame.pack(fill="x")
+
         self.mouse_mode_button = ttk.Radiobutton(
             mode_frame,
             text="鼠标连点",
@@ -75,6 +105,7 @@ class MainWindow:
             command=self._refresh_mode_state,
         )
         self.mouse_mode_button.grid(row=0, column=0, sticky="w", padx=(0, 24))
+
         self.keyboard_mode_button = ttk.Radiobutton(
             mode_frame,
             text="键盘连点",
@@ -82,15 +113,25 @@ class MainWindow:
             variable=self.mode_var,
             command=self._refresh_mode_state,
         )
-        self.keyboard_mode_button.grid(row=0, column=1, sticky="w")
+        self.keyboard_mode_button.grid(row=0, column=1, sticky="w", padx=(0, 24))
+
+        self.custom_mode_button = ttk.Radiobutton(
+            mode_frame,
+            text="自定义循环",
+            value=ClickMode.CUSTOM.value,
+            variable=self.mode_var,
+            command=self._refresh_mode_state,
+        )
+        self.custom_mode_button.grid(row=0, column=2, sticky="w")
 
         self.form_frame = ttk.LabelFrame(container, text="", padding=12)
         self.form_frame.pack(fill="x", pady=14)
         self.form_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(self.form_frame, text="点击间隔时间（秒）").grid(row=0, column=0, sticky="w", pady=6)
-        self.interval_entry = ttk.Entry(self.form_frame, textvariable=self.interval_var)
-        self.interval_entry.grid(row=0, column=1, sticky="ew", pady=6)
+        self.primary_label = ttk.Label(self.form_frame, text="")
+        self.primary_label.grid(row=0, column=0, sticky="w", pady=6)
+        self.primary_entry = ttk.Entry(self.form_frame, textvariable=self.interval_var)
+        self.primary_entry.grid(row=0, column=1, sticky="ew", pady=6)
 
         self.target_name_label = ttk.Label(self.form_frame, text="")
         self.target_name_label.grid(row=1, column=0, sticky="w", pady=6)
@@ -110,9 +151,10 @@ class MainWindow:
         self.capture_button = ttk.Button(target_frame, text="", command=self.start_target_capture)
         self.capture_button.grid(row=0, column=1)
 
-        ttk.Label(self.form_frame, text="连点时间（秒）").grid(row=2, column=0, sticky="w", pady=6)
-        self.duration_entry = ttk.Entry(self.form_frame, textvariable=self.duration_var)
-        self.duration_entry.grid(row=2, column=1, sticky="ew", pady=6)
+        self.secondary_label = ttk.Label(self.form_frame, text="")
+        self.secondary_label.grid(row=2, column=0, sticky="w", pady=6)
+        self.secondary_entry = ttk.Entry(self.form_frame, textvariable=self.duration_var)
+        self.secondary_entry.grid(row=2, column=1, sticky="ew", pady=6)
 
         self.hint_label = ttk.Label(
             self.form_frame,
@@ -146,30 +188,47 @@ class MainWindow:
 
     def _refresh_mode_state(self, reset_status: bool = True) -> None:
         mode = self._selected_mode()
-        inputs_enabled = self._capture_service is None and self._click_runner is None
+        inputs_enabled = self._capture_service is None and self._click_runner is None and self._record_dialog is None
         common_state = "normal" if inputs_enabled else "disabled"
         stop_state = "normal" if self._click_runner is not None else "disabled"
 
         self.mouse_mode_button.configure(state=common_state)
         self.keyboard_mode_button.configure(state=common_state)
-        self.interval_entry.configure(state=common_state)
-        self.duration_entry.configure(state=common_state)
+        self.custom_mode_button.configure(state=common_state)
+        self.primary_entry.configure(state=common_state)
+        self.secondary_entry.configure(state=common_state)
         self.capture_button.configure(state=common_state)
         self.start_button.configure(state=common_state)
         self.stop_button.configure(state=stop_state)
         self._apply_mode_visuals(mode)
 
-        if reset_status and self._click_runner is None and self._capture_service is None:
+        if reset_status and self._click_runner is None and self._capture_service is None and self._record_dialog is None:
             self.status_var.set(messages.default_status(mode))
 
     def _apply_mode_visuals(self, mode: ClickMode) -> None:
         self.form_frame.configure(text=messages.parameter_frame_title(mode))
+        self.primary_label.configure(text=messages.primary_label_text(mode))
+        self.primary_entry.configure(textvariable=self.loop_count_var if mode is ClickMode.CUSTOM else self.interval_var)
         self.target_name_label.configure(text=messages.target_label_text(mode))
         self.capture_button.configure(text=messages.capture_button_text(mode))
+        self.start_button.configure(text=messages.start_button_text(mode))
         self.hint_label.configure(text=messages.capture_hint(mode))
         self.target_var.set(self._selected_target_text(mode))
 
+        if mode is ClickMode.CUSTOM:
+            self.secondary_label.grid_remove()
+            self.secondary_entry.grid_remove()
+        else:
+            self.secondary_label.configure(text=messages.secondary_label_text(mode))
+            self.secondary_label.grid()
+            self.secondary_entry.grid()
+            self.secondary_entry.configure(textvariable=self.duration_var)
+
     def _selected_target_text(self, mode: ClickMode) -> str:
+        if mode is ClickMode.CUSTOM:
+            if self._custom_actions:
+                return messages.custom_action_summary(self._custom_actions)
+            return messages.DEFAULT_POSITION_TEXT
         if mode is ClickMode.KEYBOARD and self._selected_key is not None:
             return self._selected_key.display_text
         if mode is ClickMode.MOUSE and self._selected_position is not None:
@@ -177,10 +236,14 @@ class MainWindow:
         return messages.DEFAULT_POSITION_TEXT
 
     def start_target_capture(self) -> None:
-        if self._capture_service is not None:
+        if self._capture_service is not None or self._record_dialog is not None:
             return
 
         mode = self._selected_mode()
+        if mode is ClickMode.CUSTOM:
+            self._open_custom_record_dialog()
+            return
+
         self.status_var.set(messages.capture_status(mode))
         self.capture_button.configure(state="disabled")
         self.root.iconify()
@@ -197,6 +260,35 @@ class MainWindow:
             )
         self._capture_service.start()
 
+    def _open_custom_record_dialog(self) -> None:
+        self._record_dialog = CustomRecordDialog(
+            parent=self.root,
+            on_start=self._start_custom_recording,
+            on_close=self._handle_record_dialog_closed,
+        )
+        self._refresh_mode_state(reset_status=False)
+
+    def _handle_record_dialog_closed(self) -> None:
+        self._record_dialog = None
+        self._refresh_mode_state(reset_status=False)
+
+    def _start_custom_recording(self) -> None:
+        dialog = self._record_dialog
+        self._record_dialog = None
+        if dialog is not None:
+            dialog.close()
+
+        self.status_var.set(messages.capture_status(ClickMode.CUSTOM))
+        self.root.iconify()
+        self.root.after(150, self._begin_custom_recording)
+
+    def _begin_custom_recording(self) -> None:
+        self._capture_service = CustomActionRecorder(
+            on_finished=lambda actions: self.root.after(0, self._handle_custom_actions_recorded, actions)
+        )
+        self._capture_service.start()
+        self._refresh_mode_state(reset_status=False)
+
     def _handle_position_captured(self, position: ClickPosition) -> None:
         self._capture_service = None
         self._selected_position = position
@@ -210,6 +302,14 @@ class MainWindow:
         self._selected_key = target
         self.target_var.set(target.display_text)
         self.status_var.set(messages.keyboard_target_selected_status(target))
+        self._restore_window()
+        self._refresh_mode_state(reset_status=False)
+
+    def _handle_custom_actions_recorded(self, actions: List[CustomAction]) -> None:
+        self._capture_service = None
+        self._custom_actions = actions
+        self.target_var.set(self._selected_target_text(ClickMode.CUSTOM))
+        self.status_var.set(messages.custom_actions_selected_status(actions))
         self._restore_window()
         self._refresh_mode_state(reset_status=False)
 
@@ -243,7 +343,7 @@ class MainWindow:
                     on_finish=lambda result: self.root.after(0, self._handle_finish, result),
                 )
                 self.status_var.set(messages.mouse_running_status(config))
-            else:
+            elif mode is ClickMode.KEYBOARD:
                 config = build_keyboard_click_config(
                     interval_raw=self.interval_var.get(),
                     duration_raw=self.duration_var.get(),
@@ -255,6 +355,17 @@ class MainWindow:
                     on_finish=lambda result: self.root.after(0, self._handle_finish, result),
                 )
                 self.status_var.set(messages.keyboard_running_status(config))
+            else:
+                config = build_custom_loop_config(
+                    loop_count_raw=self.loop_count_var.get(),
+                    actions=self._custom_actions,
+                )
+                self._click_runner = CustomLoopRunner(
+                    config=config,
+                    on_progress=lambda progress: self.root.after(0, self._handle_progress, progress),
+                    on_finish=lambda result: self.root.after(0, self._handle_finish, result),
+                )
+                self.status_var.set(messages.custom_running_status(config))
         except ValidationError as exc:
             messagebox.showerror("参数错误", str(exc))
             return
@@ -267,18 +378,22 @@ class MainWindow:
         if self._click_runner is not None:
             self._click_runner.stop()
 
-    def _handle_progress(self, progress: ClickProgress) -> None:
-        if self._active_run_mode is ClickMode.KEYBOARD:
+    def _handle_progress(self, progress: Union[ClickProgress, CustomLoopProgress]) -> None:
+        if self._active_run_mode is ClickMode.CUSTOM:
+            self.status_var.set(messages.custom_progress_status(progress))
+        elif self._active_run_mode is ClickMode.KEYBOARD:
             self.status_var.set(messages.keyboard_progress_status(progress))
         else:
             self.status_var.set(messages.mouse_progress_status(progress))
 
-    def _handle_finish(self, result: ClickResult) -> None:
+    def _handle_finish(self, result: Union[ClickResult, CustomLoopResult]) -> None:
         completed_mode = self._active_run_mode or ClickMode.MOUSE
         self._click_runner = None
         self._active_run_mode = None
 
-        if completed_mode is ClickMode.KEYBOARD:
+        if completed_mode is ClickMode.CUSTOM:
+            finished_text = messages.custom_finished_status(result)
+        elif completed_mode is ClickMode.KEYBOARD:
             finished_text = messages.keyboard_finished_status(result)
         else:
             finished_text = messages.mouse_finished_status(result)
@@ -287,6 +402,6 @@ class MainWindow:
         self._refresh_mode_state(reset_status=False)
 
         if result.interrupted:
-            messagebox.showinfo("连点已中断", finished_text)
+            messagebox.showinfo("运行已中断", finished_text)
         else:
-            messagebox.showinfo("连点已完成", finished_text)
+            messagebox.showinfo("运行已完成", finished_text)

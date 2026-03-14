@@ -9,6 +9,10 @@ from multiclick.models import (
     ClickPosition,
     ClickProgress,
     ClickResult,
+    CustomAction,
+    CustomLoopConfig,
+    CustomLoopProgress,
+    CustomLoopResult,
     KeyboardClickConfig,
     KeyboardTarget,
     MouseClickConfig,
@@ -22,6 +26,9 @@ class MessageTests(unittest.TestCase):
 
     def test_default_status_for_keyboard_mode(self) -> None:
         self.assertEqual(messages.default_status(ClickMode.KEYBOARD), "请选择键盘连点参数后开始。")
+
+    def test_default_status_for_custom_mode(self) -> None:
+        self.assertEqual(messages.default_status(ClickMode.CUSTOM), "请选择自定义循环参数后开始。")
 
     def test_mouse_progress_status_formats_seconds(self) -> None:
         progress = ClickProgress(click_count=5, remaining_seconds=1.234)
@@ -48,13 +55,42 @@ class MessageTests(unittest.TestCase):
         self.assertIn("按键 A", status)
         self.assertIn("间隔 0.2s", status)
 
-    def test_mouse_finished_status_reflects_interruption(self) -> None:
-        result = ClickResult(click_count=12, interrupted=True)
-        self.assertEqual(messages.mouse_finished_status(result), "鼠标连点已中断，共点击 12 次。")
+    def test_custom_running_status_contains_loop_count(self) -> None:
+        config = CustomLoopConfig(
+            loop_count=3,
+            actions=[
+                CustomAction(
+                    action_type="keyboard_press",
+                    timestamp_seconds=0.1,
+                    keyboard_target=KeyboardTarget(kind="char", value="a", display_text="A"),
+                )
+            ],
+        )
+        status = messages.custom_running_status(config)
+        self.assertIn("总循环 3 次", status)
+        self.assertIn("每轮 1 个动作", status)
+
+    def test_custom_action_summary_uses_last_timestamp(self) -> None:
+        summary = messages.custom_action_summary(
+            [
+                CustomAction(action_type="mouse_press", timestamp_seconds=0.1),
+                CustomAction(action_type="mouse_release", timestamp_seconds=1.5),
+            ]
+        )
+        self.assertIn("2 个动作", summary)
+        self.assertIn("1.50 秒", summary)
+
+    def test_custom_progress_status_formats_loop_counts(self) -> None:
+        progress = CustomLoopProgress(completed_loops=2, total_loops=5)
+        self.assertIn("2/5", messages.custom_progress_status(progress))
 
     def test_keyboard_finished_status_reflects_completion(self) -> None:
         result = ClickResult(click_count=8, interrupted=False)
         self.assertEqual(messages.keyboard_finished_status(result), "键盘连点已完成，共点击 8 次。")
+
+    def test_custom_finished_status_reflects_interruption(self) -> None:
+        result = CustomLoopResult(completed_loops=1, total_loops=4, interrupted=True)
+        self.assertEqual(messages.custom_finished_status(result), "自定义循环已中断，已完成 1/4 次循环。")
 
 
 if __name__ == "__main__":
