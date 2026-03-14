@@ -1,0 +1,1 @@
+"""Multiclick desktop application package."""
