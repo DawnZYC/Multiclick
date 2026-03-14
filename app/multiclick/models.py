@@ -25,6 +25,20 @@ class MouseClickConfig:
 
 
 @dataclass(frozen=True)
+class KeyboardTarget:
+    kind: str
+    value: str
+    display_text: str
+
+
+@dataclass(frozen=True)
+class KeyboardClickConfig:
+    interval_seconds: float
+    duration_seconds: float
+    target: KeyboardTarget
+
+
+@dataclass(frozen=True)
 class ClickProgress:
     click_count: int
     remaining_seconds: float

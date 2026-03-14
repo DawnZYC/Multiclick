@@ -1,6 +1,11 @@
 from typing import Optional
 
-from multiclick.models import ClickPosition, MouseClickConfig
+from multiclick.models import (
+    ClickPosition,
+    KeyboardClickConfig,
+    KeyboardTarget,
+    MouseClickConfig,
+)
 
 
 class ValidationError(ValueError):
@@ -34,4 +39,22 @@ def build_mouse_click_config(
         interval_seconds=interval_seconds,
         duration_seconds=duration_seconds,
         position=position,
+    )
+
+
+def build_keyboard_click_config(
+    interval_raw: str,
+    duration_raw: str,
+    target: Optional[KeyboardTarget],
+) -> KeyboardClickConfig:
+    interval_seconds = parse_positive_float(interval_raw, "点击间隔时间")
+    duration_seconds = parse_positive_float(duration_raw, "连点时间")
+
+    if target is None:
+        raise ValidationError("请先设置点击按键。")
+
+    return KeyboardClickConfig(
+        interval_seconds=interval_seconds,
+        duration_seconds=duration_seconds,
+        target=target,
     )
