@@ -10,11 +10,14 @@ def build_keyboard_target(key: Union[keyboard.Key, keyboard.KeyCode]) -> Keyboar
         name = key.name or str(key).split(".")[-1]
         return KeyboardTarget(kind="key", value=name, display_text=_format_special_key_name(name))
 
-    if key.char:
+    # Modifier combinations like Ctrl+C may surface as control characters
+    # instead of the original printable key. Preserve the virtual-key code
+    # first in those cases so replay uses the physical key again.
+    if key.char and key.char.isprintable():
         return KeyboardTarget(kind="char", value=key.char, display_text=key.char.upper())
 
     if key.vk is not None:
-        return KeyboardTarget(kind="vk", value=str(key.vk), display_text=f"VK_{key.vk}")
+        return KeyboardTarget(kind="vk", value=str(key.vk), display_text=_format_vk_label(key.vk))
 
     raise ValueError("无法识别按键。")
 
@@ -77,3 +80,9 @@ def _format_special_key_name(name: str) -> str:
         "up": "Up",
     }
     return label_map.get(name, name.replace("_", " ").title())
+
+
+def _format_vk_label(vk: int) -> str:
+    if 65 <= vk <= 90 or 48 <= vk <= 57:
+        return chr(vk)
+    return f"VK_{vk}"

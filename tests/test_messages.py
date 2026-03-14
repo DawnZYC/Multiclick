@@ -4,6 +4,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
 
+from pynput import keyboard
+
 from multiclick.models import (
     ClickMode,
     ClickPosition,
@@ -18,6 +20,7 @@ from multiclick.models import (
     MouseClickConfig,
 )
 from multiclick.ui import messages
+from multiclick.services.keyboard_support import build_keyboard_target
 
 
 class MessageTests(unittest.TestCase):
@@ -91,6 +94,11 @@ class MessageTests(unittest.TestCase):
     def test_custom_finished_status_reflects_interruption(self) -> None:
         result = CustomLoopResult(completed_loops=1, total_loops=4, interrupted=True)
         self.assertEqual(messages.custom_finished_status(result), "自定义循环已中断，已完成 1/4 次循环。")
+
+    def test_build_keyboard_target_keeps_vk_label(self) -> None:
+        target = build_keyboard_target(keyboard.KeyCode.from_vk(67))
+        self.assertEqual(target.kind, "vk")
+        self.assertEqual(target.display_text, "C")
 
 
 if __name__ == "__main__":
